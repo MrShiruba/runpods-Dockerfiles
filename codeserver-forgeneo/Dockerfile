@@ -3,13 +3,14 @@ FROM nvidia/cuda:13.0.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ---- Install basic packages + Python 3.13 ----
+# ---- Install basic packages + Python 3.13 + Node.js (for ai-toolkit UI) ----
 RUN apt-get update && apt-get install -y \
     software-properties-common curl wget git vim unzip htop lsof tree ripgrep ffmpeg build-essential \
     libgl1 libglib2.0-0 libcairo2-dev pkg-config jq \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y \
-    python3.13 python3.13-venv python3.13-dev python3-tk \
+    python3.13 python3.13-venv python3.13-dev python3-tk nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Install code-server ----
@@ -62,7 +63,9 @@ set -e
 mkdir -p /workspace/logs
 cd /workspace
 
-# Clone Forge Neo if missing
+# ----------------------------------------------------
+# 1. SETUP FORGE NEO
+# ----------------------------------------------------
 if [ ! -d "sd-webui-forge-neo" ]; then
     git clone https://github.com/Haoming02/sd-webui-forge-classic sd-webui-forge-neo --branch neo
 fi
@@ -73,10 +76,7 @@ cat << 'REQEOF' > requirements.txt
 GitPython==3.1.45
 Pillow==10.4.0
 accelerate==1.10.1
-audioop-lts==0.2.2
-av==18.1.0
 clean-fid==0.1.35
-comfy-kitchen==0.2.33
 diffusers==0.35.2
 diskcache==5.6.3
 einops==0.8.1
@@ -117,22 +117,58 @@ tqdm==4.67.1
 transformers==4.56.2
 REQEOF
 
-# Setup virtual environment with Python 3.13 (and WAIT until finished)
 if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
+    echo "Creating virtual environment for Forge Neo..."
+    python3.13 -m venv venv
+    source venv/bin/activate
+    pip install --upgrade pip
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+    # For some reason I can't install these through requirements.txt, we need to do these commands inside the container after everything is installed...
+    # pip install comfy_kitchen
+    # pip install audioop-lts
+    # pip install av
+    pip install -r requirements.txt
+    deactivate
+fi
+
+# ----------------------------------------------------
+# 2. SETUP AI-TOOLKIT
+# ----------------------------------------------------
+cd /workspace
+if [ ! -d "ai-toolkit" ]; then
+    echo "Cloning AI-Toolkit..."
+    git clone https://github.com/ostris/ai-toolkit.git
+    cd ai-toolkit
+    git submodule update --init --recursive
+else
+    cd ai-toolkit
+fi
+
+if [ ! -d "venv" ]; then
+    echo "Creating virtual environment for AI-Toolkit..."
     python3.13 -m venv venv
     source venv/bin/activate
     pip install --upgrade pip
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
     pip install -r requirements.txt
-else
-    source venv/bin/activate
+    deactivate
 fi
 
+if [ -d "ui" ] && [ ! -d "ui/node_modules" ]; then
+    echo "Setting up AI-Toolkit UI..."
+    cd ui
+    npm install
+    cd ..
+fi
+
+# ----------------------------------------------------
+# 3. LAUNCH ALL SERVICES
+# ----------------------------------------------------
 export PYTORCH_VERSION="2.12.1+cu130"
 
-# Now that venv/bin/python3 exists for sure, start Forge Neo
-echo "Starting Forge Neo..."
+# Start Forge Neo (Port 3000)
+echo "Starting Forge Neo on port 3000..."
+cd /workspace/sd-webui-forge-neo
 nohup ./venv/bin/python3 -u launch.py \
     --port 3000 \
     --listen \
@@ -144,16 +180,23 @@ nohup ./venv/bin/python3 -u launch.py \
     --enable-insecure-extension-access \
     > /workspace/logs/forge-neo.log 2>&1 &
 
+# Start AI-Toolkit UI (Port 8675)
+echo "Starting AI-Toolkit UI on port 8675..."
+cd /workspace/ai-toolkit/ui
+nohup npm run build_and_start > /workspace/logs/ai-toolkit-ui.log 2>&1 &
+
+# Start RunPod Uploader (Port 2999)
 runpod-uploader --host 0.0.0.0 --port 2999 \
     > /workspace/logs/runpod-uploader.log 2>&1 &
 
-# Start code-server
+# Start Code-Server (Port 7777)
 exec code-server --host 0.0.0.0 --port 7777 /workspace \
     > /workspace/logs/code-server.log 2>&1
 EOF
 
 RUN chmod +x /start-all.sh
 
-EXPOSE 2999 3000 7777
+# Expose ports for HTTP access in RunPod
+EXPOSE 2999 3000 7777 8675
 
 CMD ["/start-all.sh"]
