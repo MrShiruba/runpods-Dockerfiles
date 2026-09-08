@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y \
-    python3.13 python3.13-venv python3.13-dev python3-tk nodejs \
+    python3.13 python3.13-venv python3.13-dev python3-tk python-is-python3 nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Install code-server ----
@@ -185,8 +185,8 @@ echo "Starting AI-Toolkit UI on port 8675..."
 cd /workspace/ai-toolkit/ui
 nohup npm run build_and_start > /workspace/logs/ai-toolkit-ui.log 2>&1 &
 
-# Start RunPod Uploader (Port 2999)
-runpod-uploader --host 0.0.0.0 --port 2999 \
+# Start RunPod Uploader (Port 2999) - max file upload size 100GB (107374182400 bytes)
+runpod-uploader --host 0.0.0.0 --port 2999 --max-size 107374182400 \
     > /workspace/logs/runpod-uploader.log 2>&1 &
 
 # Start Code-Server (Port 7777)
