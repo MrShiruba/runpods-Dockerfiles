@@ -3,7 +3,7 @@ FROM nvidia/cuda:13.0.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ---- Install basic packages + Python 3.13 + Node.js (for ai-toolkit UI) ----
+# ---- Install basic packages + Python 3.13 (Forge/AI-Toolkit) + Python 3.11 (WanGP) + Node.js (for ai-toolkit UI) ----
 RUN apt-get update && apt-get install -y \
     software-properties-common curl wget git vim unzip htop lsof tree ripgrep ffmpeg build-essential \
     libgl1 libglib2.0-0 libcairo2-dev pkg-config jq \
@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y \
     python3.13 python3.13-venv python3.13-dev python3-tk python-is-python3 nodejs \
+    python3.11 python3.11-venv python3.11-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Install code-server ----
@@ -21,7 +22,6 @@ RUN mkdir -p /root/.config/code-server && \
 cat << 'EOF' > /root/.config/code-server/config.yaml
 bind-addr: 0.0.0.0:7777
 auth: password
-password: runpod-super-secret-password
 cert: false
 user-data-dir: /root/.config/code-server/user-data
 EOF
@@ -123,16 +123,13 @@ if [ ! -d "venv" ]; then
     source venv/bin/activate
     pip install --upgrade pip
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-    # For some reason I can't install these through requirements.txt, we need to do these commands inside the container after everything is installed...
-    # pip install comfy_kitchen
-    # pip install audioop-lts
-    # pip install av
+    pip install comfy_kitchen audioop-lts av
     pip install -r requirements.txt
     deactivate
 fi
 
 # ----------------------------------------------------
-# 2. SETUP AI-TOOLKIT
+# 2. SETUP AI-TOOLKIT (Chacun son venv !)
 # ----------------------------------------------------
 cd /workspace
 if [ ! -d "ai-toolkit" ]; then
@@ -150,6 +147,7 @@ if [ ! -d "venv" ]; then
     source venv/bin/activate
     pip install --upgrade pip
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+    pip install python-dotenv
     pip install -r requirements.txt
     deactivate
 fi
@@ -162,11 +160,32 @@ if [ -d "ui" ] && [ ! -d "ui/node_modules" ]; then
 fi
 
 # ----------------------------------------------------
-# 3. LAUNCH ALL SERVICES
+# 3. SETUP WANGP (MiniMax H3) - Python 3.11 + torch 2.10 cu130 (versions recommandees par WanGP)
+# ----------------------------------------------------
+cd /workspace
+if [ ! -d "Wan2GP" ]; then
+    echo "Cloning WanGP..."
+    git clone https://github.com/deepbeepmeep/Wan2GP.git
+fi
+
+cd /workspace/Wan2GP
+
+if [ ! -d "venv" ]; then
+    echo "Creating virtual environment for WanGP..."
+    python3.11 -m venv venv
+    source venv/bin/activate
+    pip install --upgrade pip
+    pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130
+    pip install -r requirements.txt
+    deactivate
+fi
+
+# ----------------------------------------------------
+# 4. LAUNCH ALL SERVICES
 # ----------------------------------------------------
 export PYTORCH_VERSION="2.12.1+cu130"
 
-# Start Forge Neo (Port 3000)
+# Start Forge Neo (Utilise son propre venv)
 echo "Starting Forge Neo on port 3000..."
 cd /workspace/sd-webui-forge-neo
 nohup ./venv/bin/python3 -u launch.py \
@@ -180,23 +199,35 @@ nohup ./venv/bin/python3 -u launch.py \
     --enable-insecure-extension-access \
     > /workspace/logs/forge-neo.log 2>&1 &
 
-# Start AI-Toolkit UI (Port 8675)
+# Start AI-Toolkit UI (On force le PATH vers le venv d'AI-Toolkit pour ce processus et ses enfants)
 echo "Starting AI-Toolkit UI on port 8675..."
 cd /workspace/ai-toolkit/ui
-nohup npm run build_and_start > /workspace/logs/ai-toolkit-ui.log 2>&1 &
+nohup env PATH="/workspace/ai-toolkit/venv/bin:$PATH" npm run build_and_start > /workspace/logs/ai-toolkit-ui.log 2>&1 &
 
-# Start RunPod Uploader (Port 2999) - max file upload size 100GB (107374182400 bytes)
+# Start WanGP (Port 7860) - mot de passe obligatoire car l'URL RunPod est publique
+echo "Starting WanGP on port 7860..."
+cd /workspace/Wan2GP
+nohup env WANGP_AUTH_PASSWORD="${WANGP_PASSWORD:-change-moi-wangp}" \
+    ./venv/bin/python -u wgp.py \
+    --listen \
+    --server-port 7860 \
+    --public-url "https://${RUNPOD_POD_ID}-7860.proxy.runpod.net" \
+    --auth \
+    > /workspace/logs/wangp.log 2>&1 &
+
+# Start RunPod Uploader (Port 2999)
 runpod-uploader --host 0.0.0.0 --port 2999 --max-size 107374182400 \
     > /workspace/logs/runpod-uploader.log 2>&1 &
 
-# Start Code-Server (Port 7777)
+# Start Code-Server (Port 7777) - mot de passe lu depuis la variable d'env CODE_SERVER_PASSWORD
+export PASSWORD="${CODE_SERVER_PASSWORD:-change-moi-codeserver}"
 exec code-server --host 0.0.0.0 --port 7777 /workspace \
     > /workspace/logs/code-server.log 2>&1
 EOF
 
-RUN chmod +x /start-all.sh
+RUN sed -i 's/\r$//' /start-all.sh && chmod +x /start-all.sh
 
 # Expose ports for HTTP access in RunPod
-EXPOSE 2999 3000 7777 8675
+EXPOSE 2999 3000 7777 7860 8675
 
 CMD ["/start-all.sh"]
